@@ -1,0 +1,22 @@
+[package]
+name = "know-things"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "On-device documentation retrieval with immutable evidence"
+
+[dependencies]
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "backup", "hooks"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+thiserror = "=2.0.21"
+libc = "=0.2.190"
+walkdir = "=2.5.0"
+schemars = "=1.2.3"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+sha2 = { version = "=0.10.9", features = ["asm"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

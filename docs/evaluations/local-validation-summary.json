@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "kind": "anonymous-local-validation-summary",
+  "host": {
+    "cpu": "Apple M5 Max",
+    "memoryGiB": 128,
+    "os": "macOS 27.0.1"
+  },
+  "models": {
+    "embedding": "E5-base-v2",
+    "generation": "27B affine Q4, group size128"
+  },
+  "workload": {
+    "questions": 53,
+    "answerable": 47,
+    "unanswerable": 6,
+    "passes": 2,
+    "sourceDetailsPublished": false
+  },
+  "settings": {
+    "evidenceTokens": 800,
+    "inputTokens": 3840,
+    "outputTokens": 1024,
+    "deadlineMs": 30000,
+    "densePrefillBatch": 1024,
+    "staticPrefixTokens": 156
+  },
+  "passes": {
+    "first": {
+      "requests": 53,
+      "failures": 0,
+      "correctCompleteRate": 1.0,
+      "correctAbstentionRate": 1.0,
+      "jointSuccessWithin6s": 1.0,
+      "firstVisibleMs": {
+        "p50": 1592.8428329999917,
+        "p95": 1873.777333000021,
+        "p99": 2092.681583000001,
+        "samples": 53,
+        "maximum": 2092.681583000001
+      },
+      "terminalMs": {
+        "p50": 2943.1367920000043,
+        "p95": 4848.164417000006,
+        "p99": 5775.462000000005,
+        "samples": 53
+      }
+    },
+    "repeat": {
+      "requests": 53,
+      "failures": 0,
+      "correctCompleteRate": 1.0,
+      "correctAbstentionRate": 1.0,
+      "jointSuccessWithin6s": 1.0,
+      "firstVisibleMs": {
+        "p50": 1513.2788339999906,
+        "p95": 1874.6119580000027,
+        "p99": 1973.2447079999956,
+        "samples": 53,
+        "maximum": 1973.2447079999956
+      },
+      "terminalMs": {
+        "p50": 2929.126083,
+        "p95": 4700.2799999999925,
+        "p99": 5940.963875000009,
+        "samples": 53
+      }
+    }
+  },
+  "reviewerKind": "agent",
+  "evaluationRole": "post_selection_regression",
+  "releaseQualified": false,
+  "limitations": [
+    "Previously observed questions; not independent or fresh held-out evidence.",
+    "Resident-worker request timings exclude startup/import and include retrieval, prefill, restore and visible delivery.",
+    "Shared host; no isolated causal speedup or supported hardware-tier claim.",
+    "Private source manifests, questions, references, identifiers and detailed captures are excluded from this repository."
+  ]
+}
