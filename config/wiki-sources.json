@@ -1,0 +1,12 @@
+[
+  {
+    "scope": "group",
+    "owner": "engineering/platform",
+    "paths": ["Runbooks/"]
+  },
+  {
+    "scope": "project",
+    "owner": "engineering/example-service",
+    "paths": ["Runbooks/Deployment.md"]
+  }
+]

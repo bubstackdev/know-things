@@ -1,5 +1,4 @@
 /target/
-/.private/
-*.sqlite*
-*.sock
-__pycache__/
+/.env
+/.local/
+.DS_Store

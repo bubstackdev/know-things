@@ -1,211 +1,304 @@
-use know_things::{contracts::*, store::Store, transport};
+mod admin;
+mod console;
+mod daemon;
+mod evaluation;
+mod index;
+mod local_file;
+mod markdown;
+mod mcp;
+mod refresh;
+mod relevance;
+mod shortcut;
+mod source;
+mod telemetry;
+mod timeline;
+mod wire;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use serde::Serialize;
+use serde_json::json;
 use std::{
-    io::{Read, Write},
-    path::Path,
+    future::Future,
+    io::{self, Write},
+    num::NonZeroU32,
+    path::PathBuf,
+    time::Duration,
 };
-fn main() {
-    if let Err(e) = run() {
-        let _ = serde_json::to_writer(std::io::stderr(), &e);
-        eprintln!();
-        std::process::exit(1);
+
+pub const VERSION: &str = match option_env!("KNOW_THINGS_BUILD_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => concat!(env!("CARGO_PKG_VERSION"), "+local"),
+};
+
+#[derive(Parser)]
+#[command(version = VERSION, about = "Local knowledge base retrieval")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Diagnose or operate a configured Know Things installation.
+    Ops {
+        #[command(subcommand)]
+        command: console::HostCommand,
+    },
+    /// Access the daemon's private administration socket.
+    Admin {
+        #[command(subcommand)]
+        command: admin::DaemonCommand,
+    },
+    /// Export a committed KB snapshot from a local Git repository.
+    Export {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        source_dir: PathBuf,
+        #[arg(long, default_value = "HEAD")]
+        git_ref: String,
+        /// HTTPS GitLab project URL used for citations.
+        #[arg(long)]
+        repo_url: String,
+    },
+    /// Fetch upstream main into a dedicated bare repository and export it on the host.
+    Sync {
+        #[arg(long)]
+        mirror: PathBuf,
+        #[arg(long)]
+        source_dir: PathBuf,
+        /// Git remote to fetch.
+        #[arg(long)]
+        remote: String,
+        /// HTTPS GitLab project URL used for citations and to locate wikis.
+        #[arg(long)]
+        repo_url: String,
+        /// Expected time between managed checks, as configured by the scheduler.
+        #[arg(long)]
+        check_interval_seconds: Option<NonZeroU32>,
+    },
+    /// Add the approved Shortcut Markdown export to a separate offline snapshot.
+    ImportShortcut {
+        #[arg(long)]
+        base_dir: PathBuf,
+        #[arg(long)]
+        source_dir: PathBuf,
+        #[arg(long)]
+        docs: PathBuf,
+        /// Shortcut workspace slug used for citations.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Build or update an offline index from an exported snapshot.
+    Ingest {
+        #[arg(long)]
+        source_dir: PathBuf,
+        #[arg(long)]
+        database: PathBuf,
+    },
+    /// Query an index file directly for evaluation or diagnostics.
+    Query {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        query: String,
+    },
+    /// Run the local KB daemon and refresh its index from the source directory.
+    Serve {
+        #[arg(long, default_value = "/source")]
+        source_dir: PathBuf,
+        #[arg(long, default_value = "/data/index.sqlite")]
+        database: PathBuf,
+        #[arg(long, default_value = wire::DEFAULT_SOCKET)]
+        socket: PathBuf,
+        #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        poll_seconds: u64,
+    },
+    /// Serve MCP over stdin and stdout using the running daemon.
+    Mcp {
+        #[arg(long, default_value = wire::DEFAULT_SOCKET)]
+        socket: PathBuf,
+    },
+    /// Copy the current daemon report into the local Know Ops inbox.
+    RelayOps {
+        #[arg(long)]
+        docker: PathBuf,
+        #[arg(long, default_value = "desktop-linux")]
+        context: String,
+        #[arg(long, default_value = "know-things")]
+        container: String,
+        #[arg(long)]
+        inbox: Option<PathBuf>,
+    },
+    /// Inspect coverage and freshness from the running daemon.
+    Status {
+        #[arg(long, default_value = wire::DEFAULT_SOCKET)]
+        socket: PathBuf,
+        /// Exit with failure when no indexed snapshot is available.
+        #[arg(long)]
+        ready: bool,
+    },
+    /// Search through the running daemon from the local CLI.
+    Search {
+        #[arg(long, default_value = wire::DEFAULT_SOCKET)]
+        socket: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        query: String,
+    },
+    /// Score a labeled, pinned question set and time warm daemon calls.
+    Evaluate {
+        #[arg(long, default_value = wire::DEFAULT_SOCKET)]
+        socket: PathBuf,
+        /// JSONL question set, or - to read it from standard input.
+        #[arg(long)]
+        questions: PathBuf,
+        #[arg(long)]
+        commit: String,
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u16).range(1..=100))]
+        repetitions: u16,
+    },
+}
+
+fn print_json(value: impl Serialize) -> Result<()> {
+    let mut output = io::stdout().lock();
+    serde_json::to_writer(&mut output, &value)?;
+    writeln!(output)?;
+    Ok(())
+}
+
+fn run_async<T>(job: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(daemon::BLOCKING_WORKERS)
+        .thread_keep_alive(Duration::from_secs(365 * 24 * 3600))
+        .enable_all()
+        .build()?
+        .block_on(job)
+}
+
+fn call(socket: &std::path::Path, request: wire::Request) -> Result<serde_json::Value> {
+    match run_async(wire::call(socket, request))? {
+        wire::Response::Ok(data) => Ok(data),
+        wire::Response::Error(error) => anyhow::bail!("{}: {}", error.code, error.message),
     }
 }
-fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).is_some_and(|s| s == "restore") && args.len() == 4 {
-        let restored = Store::restore(Path::new(&args[2]), Path::new(&args[3]))?;
-        serde_json::to_writer_pretty(std::io::stdout(), &restored.integrity()?)?;
-        println!();
-        return Ok(());
-    }
-    if args.get(1).is_some_and(|s| s == "assets") && args.len() >= 4 {
-        match args[2].as_str() {
-            "verify" if args.len() == 4 => {
-                know_things::assets::verify(Path::new(&args[3]))?;
-                println!("Verified");
-                return Ok(());
-            }
-            "import" if args.len() == 5 => {
-                know_things::assets::import(Path::new(&args[3]), Path::new(&args[4]))?;
-                println!("Installed");
-                return Ok(());
-            }
-            _ => {
-                return Err(Error::new(
-                    "invalid_request",
-                    "Use assets verify BUNDLE or assets import SOURCE DESTINATION",
-                ));
-            }
-        }
-    }
-    if args.get(1).is_some_and(|s| s == "tokenizer-probe") && args.len() == 4 {
-        let mut worker = know_things::flash::FlashWorker::open(Path::new(&args[2]))?;
-        worker.load_tokenizer_bundle(Path::new(&args[3]))?;
-        let cases = [
-            "Hello, world!",
-            "Café 🦀 punctuation redis-cache.DotName",
-            "<|im_start|>user\nTest<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-            "<think>",
-            "</think>",
-        ];
-        let mut results = Vec::new();
-        for text in cases {
-            let ids = worker.token_ids(
-                text,
-                std::time::Instant::now() + std::time::Duration::from_secs(5),
-            )?;
-            results.push(serde_json::json!({"text":text,"tokenIds":ids}));
-        }
-        serde_json::to_writer_pretty(std::io::stdout(), &results)?;
-        println!();
-        return Ok(());
-    }
-    if args.get(1).is_some_and(|s| s == "flash-probe") && args.len() == 3 {
-        let mut worker = know_things::flash::FlashWorker::open(Path::new(&args[2]))?;
-        serde_json::to_writer_pretty(std::io::stdout(), &worker.health()?)?;
-        println!();
-        return Ok(());
-    }
-    let coordinator = |path: &Path| -> Result<know_things::coordinator::Coordinator> {
-        let mut options = std::collections::BTreeMap::new();
-        if !(args.len() - 3).is_multiple_of(2) {
-            return Err(Error::new("invalid_request", "Options require path values"));
-        }
-        for pair in args[3..].as_chunks::<2>().0 {
-            if !matches!(
-                pair[0].as_str(),
-                "--embedding-bundle"
-                    | "--flash-bundle"
-                    | "--generation-profile"
-                    | "--generation-startup-deadline-ms"
-            ) || options.insert(pair[0].as_str(), pair[1].as_str()).is_some()
-            {
-                return Err(Error::new("invalid_request", "Unknown or duplicate option"));
-            }
-        }
-        if options.contains_key("--flash-bundle") != options.contains_key("--generation-profile") {
-            return Err(Error::new(
-                "invalid_request",
-                "Generation requires both --flash-bundle and --generation-profile",
-            ));
-        }
-        let generation_startup_ms =
-            if let Some(value) = options.get("--generation-startup-deadline-ms") {
-                if !options.contains_key("--generation-profile") {
-                    return Err(Error::new(
-                        "invalid_request",
-                        "Generation startup deadline requires a generation profile",
-                    ));
-                }
-                value
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|ms| (1000..=900000).contains(ms))
-                    .ok_or_else(|| {
-                        Error::new(
-                            "invalid_request",
-                            "Generation startup deadline must be 1000–900000 ms",
-                        )
-                    })?
-            } else {
-                120000
-            };
-        let mut store = Store::open(path, None)?;
-        let mut embedding_error = None;
-        if let Some(root) = options.get("--embedding-bundle") {
-            match know_things::embedding::LocalEmbedder::open(Path::new(root)) {
-                Ok(embedder) => store.attach_embedder(Box::new(embedder))?,
-                Err(error) => {
-                    eprintln!("{}", serde_json::to_string(&error)?);
-                    embedding_error = Some(error);
-                }
-            }
-        }
-        let mut generation_error = None;
-        let generator: Option<Box<dyn know_things::generation::Generator>> =
-            if let (Some(worker), Some(profile)) = (
-                options.get("--flash-bundle"),
-                options.get("--generation-profile"),
-            ) {
-                match know_things::generation::NativeGenerator::open(
-                    Path::new(worker),
-                    Path::new(profile),
-                    std::time::Instant::now()
-                        + std::time::Duration::from_millis(generation_startup_ms),
-                ) {
-                    Ok(generator) => Some(Box::new(generator)),
-                    Err(error) => {
-                        eprintln!("{}", serde_json::to_string(&error)?);
-                        generation_error = Some(error);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-        Ok(know_things::coordinator::Coordinator::with_model_errors(
-            store,
-            generator,
-            generation_error,
-            embedding_error,
-        ))
-    };
-    match args.get(1).map(String::as_str) {
-        Some("serve") if args.len() >= 3 => {
-            let path = Path::new(&args[2]);
-            transport::serve_coordinator(path, coordinator(path)?)
-        }
-        Some("local") if args.len() >= 3 => {
-            let path = Path::new(&args[2]);
-            transport::local_coordinator(
-                coordinator(path)?,
-                std::io::stdin(),
-                transport::DeadlineStdout::new()?,
-            )
-        }
-        Some("mcp-stdio") if args.len() >= 3 => transport::mcp_coordinator(
-            coordinator(Path::new(&args[2]))?,
-            std::io::stdin(),
-            transport::DeadlineStdout::new()?,
-        ),
-        Some("request") if args.len() == 3 => {
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .take((transport::MAX_FRAME + 1) as u64)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() > transport::MAX_FRAME {
-                return Err(Error::new("resource_exhausted", "Request exceeds 1 MiB"));
-            }
-            let request: Request = serde_json::from_slice(&bytes)?;
-            let mut failed = false;
-            transport::call_stream(Path::new(&args[2]), &request, |response| {
-                failed = response.error.is_some();
-                let mut bytes = serde_json::to_vec(&response)?;
-                bytes.push(b'\n');
-                std::io::stdout().write_all(&bytes)?;
-                std::io::stdout().flush()?;
-                Ok(())
-            })?;
-            if failed {
-                std::process::exit(2);
-            }
+
+fn main() -> Result<()> {
+    match Cli::parse().command {
+        Command::Ops { command } => {
+            let reply = run_async(console::host_command(command))?;
+            print_json(reply.value)?;
+            anyhow::ensure!(reply.success, "Know Things console action did not succeed");
             Ok(())
         }
-        Some("mcp") if args.len() == 3 => transport::mcp(
-            Path::new(&args[2]),
-            std::io::stdin(),
-            transport::DeadlineStdout::new()?,
-        ),
-        Some("schema") => {
-            serde_json::to_writer_pretty(std::io::stdout(), &transport::operation_schema())?;
-            Ok(())
+        Command::Admin { command } => print_json(run_async(admin::daemon_command(command))?),
+        Command::Export {
+            repo,
+            source_dir,
+            git_ref,
+            repo_url,
+        } => {
+            let snapshot = source::export(&repo, &source_dir, &git_ref, &repo_url)?;
+            print_json(json!({ "commit": snapshot.commit, "files": snapshot.files.len() }))
         }
-        _ => {
-            println!(
-                "Know-Things {}\n\n  know-things serve DATA_DIR [ASSET_OPTIONS]\n  know-things local DATA_DIR [ASSET_OPTIONS] < requests.ndjson > responses.ndjson\n  know-things mcp-stdio DATA_DIR [ASSET_OPTIONS]\n  know-things request DATA_DIR < request.json\n  know-things mcp DATA_DIR\n  know-things schema\n\nASSET_OPTIONS: --embedding-bundle PATH; --flash-bundle PATH --generation-profile PATH\nRequests require schemaVersion=1, requestId, and operation. See README.md.",
-                env!("CARGO_PKG_VERSION")
+        Command::Sync {
+            mirror,
+            source_dir,
+            remote,
+            repo_url,
+            check_interval_seconds,
+        } => print_json(source::sync(
+            &mirror,
+            &source_dir,
+            &remote,
+            &repo_url,
+            check_interval_seconds,
+        )?),
+        Command::ImportShortcut {
+            base_dir,
+            source_dir,
+            docs,
+            workspace,
+        } => {
+            let snapshot = source::import_shortcut(&base_dir, &source_dir, &docs, &workspace)?;
+            print_json(json!({
+                "commit": snapshot.revision(),
+                "shortcut_docs": snapshot.shortcut_docs.len(),
+            }))
+        }
+        Command::Ingest {
+            source_dir,
+            database,
+        } => {
+            let snapshot = source::Snapshot::load(&source_dir)?;
+            print_json(index::ingest(
+                &mut index::initialize(&database)?,
+                &snapshot,
+            )?)
+        }
+        Command::Query {
+            database,
+            limit,
+            query,
+        } => print_json(index::search(
+            &mut index::reader(&database, None)?,
+            &query,
+            limit,
+        )?),
+        Command::Serve {
+            source_dir,
+            database,
+            socket,
+            poll_seconds,
+        } => run_async(daemon::serve(
+            database,
+            source_dir,
+            socket,
+            Duration::from_secs(poll_seconds),
+        )),
+        Command::Mcp { socket } => run_async(mcp::serve(socket)),
+        Command::RelayOps {
+            docker,
+            context,
+            container,
+            inbox,
+        } => {
+            let inbox = match inbox {
+                Some(path) => path,
+                None => telemetry::default_inbox()?,
+            };
+            run_async(telemetry::relay(&docker, &context, &container, &inbox))
+        }
+        Command::Status { socket, ready } => {
+            let status = call(&socket, wire::Request::Status)?;
+            let available = status["indexed_commit"].is_string();
+            print_json(status)?;
+            anyhow::ensure!(
+                !ready || available,
+                "KB is waiting for an indexed source snapshot"
             );
             Ok(())
         }
+        Command::Search {
+            socket,
+            limit,
+            query,
+        } => print_json(call(
+            &socket,
+            wire::Request::Search(wire::SearchArgs { query, limit }),
+        )?),
+        Command::Evaluate {
+            socket,
+            questions,
+            commit,
+            repetitions,
+        } => print_json(run_async(evaluation::evaluate(
+            &socket,
+            &questions,
+            &commit,
+            repetitions,
+        ))?),
     }
 }

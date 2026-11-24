@@ -1,20 +1,28 @@
-# Working on Know-Things
+# Repository Guidelines
 
-Read [README.md](README.md) for the documentation map. Before implementation, read the architecture and contracts; use the validation plan to choose the next milestone. Update the owning document when a material decision changes.
+## Project Structure
 
-## Confirmed product direction
+Know Things is a Rust CLI and daemon for local knowledge-base retrieval. The CLI starts in `src/main.rs`. Snapshot export and import live in `src/source.rs` and `src/shortcut.rs`. SQLite indexing and ranking live in `src/index.rs` and `src/relevance.rs`. The daemon and MCP adapter live in `src/daemon.rs` and `src/mcp.rs`. Integration tests live in `tests/cli.rs`. See `config/wiki-sources.json` for wiki configuration, `scripts/` for launch agent templates, `docs/adr/` for current design decisions, and `docs/zak/` for design and benchmark history.
 
-- Know-Things focuses on documentation. the sibling `../knowcode` project owns source-code understanding.
-- Documentation sources are configured per installation. Treat them as read-only; perform lifecycle tests on disposable copies. See [docs/CORPUS.md](docs/CORPUS.md) for corpus handling and evaluation scope.
-- Everything runs on-device, including embeddings and answer generation. No cloud inference fallback.
-- The accepted starting architecture is Rust, SQLite FTS5, vector retrieval, and a persistent Flash worker. Specific models and any ANN backend require qualification.
-- `../flash` is a sibling project with ongoing work. Inspect it read-only unless changes there are explicitly authorized. Release integration must use a pinned artifact rather than an implicit dependency on its mutable checkout.
-- Prefer simple ownership and transactional correctness. Add index/runtime complexity only for a demonstrated requirement and include its recovery/upgrade path.
+## Build, Test, and Run Locally
 
-## Protect other sessions on this computer
+Use Rust 1.96 or newer and Git. The documented container workflow uses Docker Desktop on Apple Silicon.
 
-Permanent user instruction, 2026-10-15: Never suspend or interfere with the user's other terminal sessions or their processes, in any session on this computer.
+- `cargo build --locked --release` builds `target/release/know-things`.
+- `cargo run --locked -- --help` lists the CLI commands.
+- `cargo test --locked --all-targets` runs unit and integration tests.
+- `docker --context desktop-linux compose up --build -d --wait` builds and starts the daemon after you export a committed KB snapshot and set `KB_SOURCE_DIR`. Follow the setup in `README.md`.
 
-- Never send SIGSTOP/SIGTSTP, stop or terminate another session's jobs, or change its terminal state to obtain benchmark isolation or free resources.
-- Control only jobs started by the current session. If other work competes for resources, wait, reduce or stop your own workload, or report the contention.
-- Broad statements such as "the machine is yours" do not authorize disrupting other sessions. Do not reuse the prior process-isolation approach or create automatic suspension timers.
+## Style and Testing
+
+Use four-space indentation and run `cargo fmt --all -- --check` to check formatting. Follow the surrounding Rust naming conventions with `snake_case` for functions and modules and `UpperCamelCase` for types.
+
+Use Rust's built-in test harness and `#[tokio::test]` for async integration tests. Name tests for the behavior they verify, for example `managed_sync_keeps_the_export_after_a_failed_fetch`. Use temporary Git fixtures for CLI tests. Run `cargo test --locked --test cli` for the integration suite. The MCP stdio test needs permission to open a local Unix socket.
+
+## Commits and Reviews
+
+Use short, imperative commit subjects, following Git history examples such as `Simplify console response validation`. In merge requests, summarize the behavior change, list verification commands and results, and link a related issue when available.
+
+## Local Data and Sessions
+
+Keep private snapshots, credentials, and evaluation data out of Git. Use `.local/` for private working data. Control only jobs started by your session. Never suspend, terminate, or change the terminal state of another session or its processes.
